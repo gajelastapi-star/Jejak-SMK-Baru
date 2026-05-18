@@ -1,4 +1,4 @@
-﻿﻿<!doctype html>
+<!doctype html>
 <html lang="id" class="light">
   <head>
     <meta charset="UTF-8" />
@@ -1426,6 +1426,78 @@
         });
       }
 
+      // SERVER POLLING: fetch attendance reports from server-side API for admin users
+      window.serverPollIntervalId = null;
+      async function fetchServerAttendanceOnce() {
+        try {
+          const resp = await fetch('./api/attendance.php?role=guru', { headers: { Accept: 'application/json' } });
+          if (!resp.ok) return;
+          const body = await resp.json();
+          if (!body.success) return;
+          const reports = body.reports || [];
+
+          // render photo reports in admin panel
+          try {
+            renderAdminPhotoReports(reports);
+          } catch (e) {
+            console.error('renderAdminPhotoReports error', e);
+          }
+
+          // update map markers from reports
+          const now = Date.now();
+          reports.forEach((r) => {
+            const id = String(r.studentId || r.student_id || r.id || (r.userId || r.user_id) || r.name);
+            const lat = Number(r.lat) || null;
+            const lng = Number(r.lng) || null;
+            if (lat == null || lng == null) return;
+            const isInside = !r.activeUntil || Number(r.activeUntil) > now;
+            const photoThumb = r.photo || getDefaultPhoto();
+            const color = isInside ? '#22c55e' : '#ef4444';
+
+            const icon = L.divIcon({
+              html: `<div class="w-7 h-7 border-4 border-white rounded-full shadow-lg bg-cover" style="background-color:${color}; background-image:url('${photoThumb}')"></div>`,
+              className: '',
+            });
+
+            if (window.allMapMarkers[id]) {
+              try {
+                window.allMapMarkers[id].marker.setLatLng([lat, lng]);
+                window.allMapMarkers[id].marker.setIcon(icon);
+                window.allMapMarkers[id].data = {
+                  lat, lng, name: r.name, class: r.class, jurusan: r.jurusan, absenNo: r.absenNo || r.absen_no, photo: photoThumb, isInside, timestamp: Number(r.timestamp) || now,
+                };
+              } catch (e) {
+                console.error(e);
+              }
+            } else {
+              const m = L.marker([lat, lng], { icon }).bindPopup(
+                `<div class="text-center space-y-2"><img src="${photoThumb}" class="w-20 h-20 object-cover rounded-2xl mx-auto"/><p class="font-black text-xs uppercase">${r.name}</p><p class="text-[9px] font-bold text-blue-500">${r.class}</p><p class="text-[9px] font-bold text-slate-400">ABSEN ${r.absenNo || r.absen_no || '-'}</p></div>`,
+              );
+              window.allMapMarkers[id] = { marker: m, data: { lat, lng, name: r.name, class: r.class, jurusan: r.jurusan, absenNo: r.absenNo || r.absen_no, photo: photoThumb, isInside, timestamp: Number(r.timestamp) || now } };
+            }
+          });
+
+          refreshVisibleMarkers();
+
+        } catch (e) {
+          // network or parse error
+          console.error('fetchServerAttendanceOnce error', e);
+        }
+      }
+
+      function startServerPolling() {
+        // avoid duplicate intervals
+        if (window.serverPollIntervalId) return;
+        fetchServerAttendanceOnce();
+        window.serverPollIntervalId = setInterval(fetchServerAttendanceOnce, 5000);
+      }
+
+      function stopServerPolling() {
+        if (!window.serverPollIntervalId) return;
+        clearInterval(window.serverPollIntervalId);
+        window.serverPollIntervalId = null;
+      }
+
       // TULIS LOKASI SAYA KE CLOUD
       window.shareMyLocation = function (lat, lng, isInside) {
         if (
@@ -2171,6 +2243,10 @@
         startLiveClock();
         initMap();
         initCloud();
+        // start server polling when admin is using server session
+        if (window.currentUser.role === 'guru' && window.currentUser.sessionMode === 'server') {
+          startServerPolling();
+        }
       }
 
       window.onload = function () {
@@ -2299,6 +2375,7 @@
           role: window.currentUser.role || "",
         };
         localStorage.removeItem("smkn2_live_session");
+        stopServerPolling();
 
         if (
           currentSession.role === "siswa" &&
@@ -2610,6 +2687,35 @@
               status: "ACTIVE",
             },
           ).catch((error) => console.error(error));
+        }
+
+        // jika pengguna memakai sesi server, kirim juga ke API server sehingga admin dapat melihatnya
+        if (window.currentUser.role === 'siswa' && window.currentUser.sessionMode === 'server') {
+          fetch('./api/attendance.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({
+              studentId: window.currentUser.id,
+              sessionToken: window.currentUser.sessionToken || '',
+              name: window.currentUser.name,
+              class: window.currentUser.class,
+              jurusan: window.currentUser.jurusan,
+              absenNo: window.currentUser.absenNo,
+              lat: window.userPos[0],
+              lng: window.userPos[1],
+              photo: window.currentUser.lastAttendancePhoto || '',
+              timestamp: Date.now(),
+              activeUntil,
+              status: 'ACTIVE',
+            }),
+          })
+            .then((r) => r.json().catch(() => ({})))
+            .then((j) => {
+              if (!j || j.success === false) {
+                console.error('Server attendance error', j);
+              }
+            })
+            .catch((e) => console.error('Failed to post attendance to server', e));
         }
         showNotification("Berhasil absen. Status aktif selama 8 jam.", "success");
         updateAbsenButtonState();
